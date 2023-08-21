@@ -1,0 +1,120 @@
+org: ivanavitdev
+app: sls-cognito-trigger
+service: sls-cognito-trigger
+frameworkVersion: "3"
+
+custom:
+  tableName: "users-table-${sls:stage}"
+  userPoolClientName: "users-upc-${sls:stage}"
+  userPoolDomainName: "users-upd-${sls:stage}"
+  dynamodb:
+    stages:
+      - dev
+    start:
+      migrate: true
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ap-southeast-1
+  iam:
+    role:
+      name: sls-cognito-trigger-${sls:stage}-role
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+          Resource:
+            - Fn::GetAtt: [UsersTable, Arn]
+      managePolicies:
+        - "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonCognitoDeveloperAuthenticatedIdentities"
+        - "arn:aws:iam::aws:policy/AmazonCognitoPowerUser"
+  environment:
+    USERS_TABLE: ${self:custom.tableName}
+
+resources:
+  Resources:
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+          - AttributeName: createdAt
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+    CognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_phone_number
+              Priority: 1
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: false
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireLowercase: false
+            RequireNumbers: false
+            RequireUppercase: false
+            RequireSymbols: false
+        AutoVerifiedAttributes:
+          - "phone_number"
+        UsernameAttributes:
+          - "phone_number"
+        MfaConfiguration: OFF
+        Schema:
+          - Name: email
+            Required: true
+            Mutable: true
+          - Name: given_name
+            Required: true
+            Mutable: true
+          - Name: family_name
+            Required: true
+            Mutable: true
+        SmsConfiguration:
+          SnsCallerArn: "arn:aws:iam::341098381609:role/service-role/sms-cognito"
+    UserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:custom.userPoolClientName}
+        UserPoolId:
+          Ref: CognitoUserPool
+        ExplicitAuthFlows:
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        AllowedOAuthFlowsUserPoolClient: true
+        AllowedOAuthScopes:
+          - phone
+          - openid
+        GenerateSecret: true
+        CallbackURLs:
+          - "http://localhost:3000/callback"
+        LambdaConfig:
+          PostConfirmation: !GetAtt PostConfirmationLambdaFunction.Arn
+    UserPoolDomain:
+      Type: AWS::Cognito::UserPoolDomain
+      Properties:
+        Domain: ${self:custom.userPoolDomainName}
+        UserPoolId:
+          Ref: CognitoUserPool
+    UserPoolInvokeConfirmUserSignupLambdaPermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        Action: lambda:invokeFunction
+        FunctionName: !Ref PostConfirmationLambdaFunction
+        Principal: cognito-idp.amazonaws.com
+        SourceArn: !GetAtt CognitoUserPool.Arn
+
+functions:
+  post-confirmation:
+    handler: post-confirmation.handler
